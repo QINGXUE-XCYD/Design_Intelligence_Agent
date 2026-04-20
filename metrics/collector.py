@@ -25,11 +25,17 @@ class MetricsCollector:
             "total_path_length": self.compute_total_path_length(agents),
         })
 
+    def export_step_records(self) -> List[Dict]:
+        """
+        导出逐步记录 / Export per-step records
+        """
+        return list(self.step_records)
+
     def finalize_episode(
-        self,
-        env_map: GridMap,
-        agents: List[RobotAgent],
-        total_steps: int,
+            self,
+            env_map: GridMap,
+            agents: List[RobotAgent],
+            total_steps: int,
     ) -> Dict:
         """
         汇总整局仿真结果 / Summarize final episode results

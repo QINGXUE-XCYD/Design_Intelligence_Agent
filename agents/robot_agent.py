@@ -43,6 +43,7 @@ class RobotAgent:
         executor: ActionExecutor,
     ) -> None:
         self.state = AgentState(robot_id=robot_id, position=start_pos)
+        self.state.trajectory.append(start_pos)  # 记录初始位置 / record initial position
         self.belief_map = belief_map
         self.sensor_model = sensor_model
         self.frontier_detector = frontier_detector
@@ -108,6 +109,9 @@ class RobotAgent:
         5. move one step
         6. clean current cell
         """
+        # 如果已经 DONE，则不再执行 / If already done, do nothing
+        if self.state.mode == AgentMode.DONE:
+            return
         self.state.steps_taken += 1
 
         observation = self.perceive(env_map)
@@ -125,6 +129,7 @@ class RobotAgent:
 
             if goal is None:
                 self.state.mode = AgentMode.DONE
+                self.state.done_reason = "no_frontier_available"
                 self.mark_current_cell_cleaned(env_map)
                 return
 
@@ -148,6 +153,7 @@ class RobotAgent:
             else:
                 self.state.total_path_length += 1.0
                 self.state.position = new_pos
+                self.state.trajectory.append(new_pos)  # 记录轨迹 / append trajectory
                 self.state.current_path = self.state.current_path[1:]
         else:
             self.state.mode = AgentMode.IDLE

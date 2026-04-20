@@ -8,6 +8,8 @@ from control.executor import ActionExecutor
 from agents.robot_agent import RobotAgent
 from simulation.engine import SimulationEngine
 from metrics.collector import MetricsCollector
+from utils.run_saver import RunSaver
+from visualisation.renderer import MapRenderer
 
 
 def build_single_robot_demo() -> SimulationEngine:
@@ -55,6 +57,31 @@ def build_single_robot_demo() -> SimulationEngine:
 
 if __name__ == "__main__":
     engine = build_single_robot_demo()
+
+    run_dir = RunSaver.create_run_dir()
+    renderer = MapRenderer()
+
+    # 运行仿真 / Run simulation
     results = engine.run()
+
+    # 保存结果 / Save artifacts
+    RunSaver.save_metrics(results, run_dir / "metrics.json")
+    RunSaver.save_step_records(
+        engine.metrics_collector.export_step_records(),
+        run_dir / "step_records.csv",
+    )
+
+    renderer.render_run_overview(
+        env_map=engine.env_map,
+        agents=engine.agents,
+        save_path=run_dir / "run_overview.png",
+    )
+    
+    renderer.plot_coverage_curve(
+        engine.metrics_collector.export_step_records(),
+        run_dir / "coverage_curve.png",
+    )
+
     print("Simulation finished.")
     print(results)
+    print(f"Artifacts saved to: {run_dir}")

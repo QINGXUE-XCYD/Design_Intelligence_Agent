@@ -1,5 +1,6 @@
 from typing import List
 
+from agents.agent_state import AgentMode
 from agents.robot_agent import RobotAgent
 from environment.grid_map import GridMap
 from metrics.collector import MetricsCollector
@@ -25,6 +26,7 @@ class SimulationEngine:
         self.metrics_collector = metrics_collector
         self.max_steps = max_steps
         self.current_step = 0
+        self.termination_reason = None
 
     def step(self) -> None:
         """
@@ -45,10 +47,14 @@ class SimulationEngine:
         判断仿真是否结束 / Check whether simulation is finished
         """
         if self.current_step >= self.max_steps:
+            self.termination_reason = "max_steps_reached"
             return True
 
-        # 所有机器人都进入 DONE，可视为阶段性结束
-        return all(agent.state.mode.value == "done" for agent in self.agents)
+        if all(agent.state.mode == AgentMode.DONE for agent in self.agents):
+            self.termination_reason = "all_agents_done"
+            return True
+
+        return False
 
     def run(self) -> dict:
         """
@@ -57,8 +63,16 @@ class SimulationEngine:
         while not self.is_done():
             self.step()
 
-        return self.metrics_collector.finalize_episode(
+        results = self.metrics_collector.finalize_episode(
             env_map=self.env_map,
             agents=self.agents,
             total_steps=self.current_step,
         )
+
+        results["termination_reason"] = self.termination_reason
+        results["per_agent_done_reason"] = {
+            agent.state.robot_id: agent.state.done_reason
+            for agent in self.agents
+        }
+
+        return results
