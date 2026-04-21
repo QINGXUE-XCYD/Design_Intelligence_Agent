@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from collections import deque
 from typing import List, Optional, Tuple
 
 from agents.agent_state import AgentMode, AgentState
@@ -49,6 +51,118 @@ class RobotAgent:
         self.frontier_detector = frontier_detector
         self.planner = planner
         self.executor = executor
+
+    def _is_reachable_in_truth(self, env_map: GridMap, start: Position, goal: Position) -> bool:
+        """
+        在真实环境地图上检查可达性 / Check reachability on the ground-truth map
+        """
+        if start == goal:
+            return True
+        if not env_map.is_walkable(goal):
+            return False
+
+        queue = deque([start])
+        visited = {start}
+
+        while queue:
+            current = queue.popleft()
+
+            for nb in env_map.get_neighbors(current):
+                if nb in visited:
+                    continue
+                if not env_map.is_walkable(nb):
+                    continue
+
+                if nb == goal:
+                    return True
+
+                visited.add(nb)
+                queue.append(nb)
+
+        return False
+
+    def _is_reachable_in_belief(self, start: Position, goal: Position) -> bool:
+        """
+        在 belief map 上检查可达性 / Check reachability on the belief map
+
+        这里直接复用 planner：
+        - 若 path 长度 >= 2，则视为可达
+        - 若 start == goal，也视为可达
+        """
+        if start == goal:
+            return True
+
+        path = self.plan_path(goal)
+        return len(path) >= 2
+
+    def _debug_frontier_failure(self, env_map: GridMap, failed_goal: Position) -> None:
+        """
+        当选中的 frontier 不可规划时，输出调试信息
+        Print debug information when the selected frontier cannot be planned to
+        """
+        start = self.state.position
+        frontiers = self.frontier_detector.detect(self.belief_map)
+
+        print("\n[DEBUG] Frontier planning failure detected")
+        print(f"[DEBUG] robot_id={self.state.robot_id}")
+        print(f"[DEBUG] current_position={start}")
+        print(f"[DEBUG] selected_goal={failed_goal}")
+        print(f"[DEBUG] frontier_count={len(frontiers)}")
+
+        truth_reachable = self._is_reachable_in_truth(env_map, start, failed_goal)
+        belief_reachable = self._is_reachable_in_belief(start, failed_goal)
+
+        print(f"[DEBUG] selected_goal_truth_reachable={truth_reachable}")
+        print(f"[DEBUG] selected_goal_belief_reachable={belief_reachable}")
+
+        print("[DEBUG] first 10 frontiers:")
+        for i, frontier in enumerate(frontiers[:10]):
+            path = self.plan_path(frontier)
+            f_truth = self._is_reachable_in_truth(env_map, start, frontier)
+            f_belief = len(path) >= 2 or frontier == start
+            print(
+                f"  frontier[{i}]={frontier}, "
+                f"truth_reachable={f_truth}, "
+                f"belief_reachable={f_belief}, "
+                f"path_len={len(path)}"
+            )
+
+    def _manhattan_distance(self, a: Position, b: Position) -> int:
+        """
+        计算曼哈顿距离 / Compute Manhattan distance
+        """
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def choose_reachable_goal(self) -> tuple[Optional[Position], List[Position], str]:
+        """
+        选择一个可达的 frontier 目标 / Choose a reachable frontier goal
+
+        返回：
+        - goal: 选中的目标
+        - path: 到目标的路径
+        - reason:
+            "reachable_frontier_found"
+            "no_frontier_available"
+            "no_reachable_frontier"
+        """
+        frontiers = self.frontier_detector.detect(self.belief_map)
+
+        if not frontiers:
+            return None, [], "no_frontier_available"
+
+        # 先按距离排序 / Sort by distance first
+        frontiers = sorted(
+            frontiers,
+            key=lambda p: self._manhattan_distance(self.state.position, p)
+        )
+
+        # 逐个测试可达性 / Test reachability one by one
+        for frontier in frontiers:
+            path = self.plan_path(frontier)
+            if frontier == self.state.position or len(path) >= 2:
+                return frontier, path, "reachable_frontier_found"
+
+        return None, [], "no_reachable_frontier"
 
     def perceive(self, env_map: GridMap) -> Observation:
         """
@@ -124,16 +238,20 @@ class RobotAgent:
             or self.state.position == self.state.current_goal
             or not self.state.current_path
         ):
-            goal = self.choose_goal()
+            goal, path, reason = self.choose_reachable_goal()
             self.state.current_goal = goal
 
             if goal is None:
                 self.state.mode = AgentMode.DONE
-                self.state.done_reason = "no_frontier_available"
+                self.state.done_reason = reason
                 self.mark_current_cell_cleaned(env_map)
                 return
 
-            self.state.current_path = self.plan_path(goal)
+            self.state.current_path = path
+            # 调试：goal 存在，但 planner 没找到可执行路径
+            # Debug: goal exists, but planner failed to produce a usable path
+            if goal is not None and goal != self.state.position and len(self.state.current_path) < 2:
+                self._debug_frontier_failure(env_map, goal)
 
         if len(self.state.current_path) >= 2:
             self.state.mode = AgentMode.MOVING
@@ -159,5 +277,4 @@ class RobotAgent:
             self.state.mode = AgentMode.IDLE
             self.state.idle_steps += 1
 
-        self.state.mode = AgentMode.CLEANING
         self.mark_current_cell_cleaned(env_map)
