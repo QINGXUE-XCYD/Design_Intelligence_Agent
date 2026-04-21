@@ -5,10 +5,12 @@ from typing import List, Tuple
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
+from matplotlib.patches import Rectangle
 
 from agents.robot_agent import RobotAgent
 from environment.grid_map import GridMap
 from mapping.occupancy_grid import OccupancyState
+from planning import astar_planner
 
 
 class MapRenderer:
@@ -79,10 +81,16 @@ class MapRenderer:
                 env_map=env_map,
                 title=f"Robot {agent.state.robot_id} Trajectory",
             )
+            color = self._get_agent_color(idx - 1)
+            self._draw_cleanup_hatching(
+                ax=axes[0, idx],
+                cleanup_cells=self._get_cleanup_cleaned_cells(agent),
+                hatch_color=color,
+            )
             self._draw_agent_trajectory(
                 ax=axes[0, idx],
                 agent=agent,
-                color=self._get_agent_color(idx - 1),
+                color=color,
             )
             axes[0, idx].legend(loc="upper right")
 
@@ -101,14 +109,14 @@ class MapRenderer:
 
         for idx, agent in enumerate(agents):
             color = self._get_agent_color(idx)
-            cx, cy = agent.state.position
+            sx, sy = self._get_agent_start_position(agent)
             axes[1, 0].scatter(
-                cx,
-                cy,
+                sx,
+                sy,
                 marker="o",
                 s=70,
                 color=color,
-                label=f"Robot {agent.state.robot_id}",
+                label=f"Robot {agent.state.robot_id} start",
             )
         axes[1, 0].legend(loc="upper right")
 
@@ -128,10 +136,10 @@ class MapRenderer:
                 title=f"Robot {agent.state.robot_id} Belief Map",
             )
 
-            cx, cy = agent.state.position
+            sx, sy = self._get_agent_start_position(agent)
             axes[1, idx].scatter(
-                cx,
-                cy,
+                sx,
+                sy,
                 marker="o",
                 s=70,
                 color=color,
@@ -299,23 +307,130 @@ class MapRenderer:
         ax.grid(True, which="both", color="lightgray", linewidth=0.5, alpha=0.5)
         ax.set_aspect("equal")
 
+    def _get_agent_start_position(self, agent: RobotAgent) -> Tuple[int, int]:
+        """
+        获取机器人起点 / Get robot start position
+        """
+        if agent.state.trajectory:
+            return agent.state.trajectory[0]
+        return agent.state.position
+
+    def _get_cleanup_split_index(self, agent: RobotAgent) -> int | None:
+        """
+        获取 explore -> cleanup 的轨迹切换点索引
+        Get the trajectory split index from exploration to cleanup
+        """
+        value = getattr(agent, "cleanup_start_traj_index", None)
+        if value is None:
+            value = getattr(agent.state, "cleanup_start_traj_index", None)
+        return value
+
+    def _get_cleanup_cleaned_cells(self, agent: RobotAgent) -> List[Tuple[int, int]]:
+        """
+        获取 cleanup 阶段首次清扫到的格子
+        Get cells first cleaned during cleanup phase
+        """
+        value = getattr(agent, "cleanup_cleaned_cells", None)
+        if value is None:
+            value = getattr(agent.state, "cleanup_cleaned_cells", None)
+        if value is None:
+            return []
+        return list(value)
+
+    def _draw_cleanup_hatching(self, ax, cleanup_cells: List[Tuple[int, int]], hatch_color: str) -> None:
+        """
+        在 cleanup 阶段首次清扫到的格子上叠加斜线填充
+        Overlay hatched rectangles on cells first cleaned during cleanup
+        """
+        hatch_rgba = mcolors.to_rgba(hatch_color, alpha= 0.45)
+        for x, y in cleanup_cells:
+            rect = Rectangle(
+                (x - 0.5, y - 0.5),
+                1.0,
+                1.0,
+                facecolor=(1.0, 1.0, 1.0, 0.0),
+                edgecolor=hatch_rgba,
+                linewidth=0.0,
+                hatch='///',
+                zorder=2,
+            )
+            ax.add_patch(rect)
+
     def _draw_agent_trajectory(self, ax, agent: RobotAgent, color: str) -> None:
         """
-        绘制单个机器人的轨迹 / Draw trajectory of one robot
+        绘制单个机器人的轨迹，并区分 exploration / cleanup
+        Draw one robot trajectory with exploration / cleanup separation
         """
         traj = agent.state.trajectory
         if not traj:
             return
 
-        xs = [p[0] for p in traj]
-        ys = [p[1] for p in traj]
+        split_idx = self._get_cleanup_split_index(agent)
+        robot_id = agent.state.robot_id
 
-        ax.plot(xs, ys, linewidth=2, alpha=0.9, color=color, label=f"Robot {agent.state.robot_id}")
+        if split_idx is None:
+            xs = [p[0] for p in traj]
+            ys = [p[1] for p in traj]
+            ax.plot(
+                xs,
+                ys,
+                linewidth=2.0,
+                alpha=0.85,
+                color=color,
+                linestyle='-',
+                label=f"Robot {robot_id} trajectory",
+                zorder=3,
+            )
+        else:
+            split_idx = max(0, min(split_idx, len(traj) - 1))
+            explore_traj = traj[: split_idx + 1]
+            cleanup_traj = traj[split_idx:]
+
+            if len(explore_traj) >= 2:
+                exs = [p[0] for p in explore_traj]
+                eys = [p[1] for p in explore_traj]
+                ax.plot(
+                    exs,
+                    eys,
+                    linewidth=1.8,
+                    alpha=0.80,
+                    color=color,
+                    linestyle='-',
+                    label=f"Robot {robot_id} explore",
+                    zorder=3,
+                )
+
+            if len(cleanup_traj) >= 2:
+                cxs = [p[0] for p in cleanup_traj]
+                cys = [p[1] for p in cleanup_traj]
+                ax.plot(
+                    cxs,
+                    cys,
+                    linewidth=2.8,
+                    alpha=0.95,
+                    color=color,
+                    linestyle='--',
+                    label=f"Robot {robot_id} cleanup",
+                    zorder=4,
+                )
+
+            switch_x, switch_y = traj[split_idx]
+            ax.scatter(
+                switch_x,
+                switch_y,
+                marker='D',
+                s=80,
+                color=color,
+                edgecolors='white',
+                linewidths=1.0,
+                label='phase switch',
+                zorder=5,
+            )
 
         sx, sy = traj[0]
         ex, ey = traj[-1]
-        ax.scatter(sx, sy, marker="o", s=70, color=color)
-        ax.scatter(ex, ey, marker="x", s=90, color=color)
+        ax.scatter(sx, sy, marker='o', s=70, color=color, zorder=6)
+        ax.scatter(ex, ey, marker='x', s=90, color=color, zorder=6)
 
     def _get_agent_color(self, idx: int) -> str:
         """

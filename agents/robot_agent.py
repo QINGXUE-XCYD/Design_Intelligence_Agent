@@ -54,6 +54,10 @@ class RobotAgent:
         # 是否已经从探索阶段切换到补扫阶段
         # Whether the robot has switched from exploration to cleanup
         self.in_cleanup_phase = False
+        # 补扫阶段开始时对应的轨迹索引与坐标
+        # Trajectory split index and position when cleanup starts
+        self.cleanup_start_traj_index: int | None = None
+        self.cleanup_cleaned_cells: set[Position] = set()
 
     def _is_reachable_in_truth(self, env_map: GridMap, start: Position, goal: Position) -> bool:
         """
@@ -256,6 +260,10 @@ class RobotAgent:
             env_map.mark_cleaned(pos)
             self.belief_map.mark_cleaned(pos)
             self.state.cleaned_cells += 1
+            # 记录 cleanup 阶段首次清扫到的格子
+            # Record cells first cleaned during cleanup phase
+            if getattr(self, 'in_cleanup_phase', False):
+                self.cleanup_cleaned_cells.add(pos)
 
     def step(self, env_map: GridMap) -> None:
         """
@@ -307,6 +315,10 @@ class RobotAgent:
                     # frontier 用完了，切换到补扫阶段
                     # No reachable frontier left, switch to cleanup phase
                     self.in_cleanup_phase = True
+                    # 记录 explore -> cleanup 的切换点
+                    # Record the switch point from exploration to cleanup
+                    if self.cleanup_start_traj_index is None:
+                        self.cleanup_start_traj_index = max(0, len(self.state.trajectory) - 1)
 
             # =========================
             # 阶段 2：补扫 / Cleanup
