@@ -26,6 +26,17 @@ class RobotConfig:
     sensor_range: int = 3
     max_steps: int = 500
 
+@dataclass
+class BatchConfig:
+    """
+    批量实验配置 / Batch experiment configuration
+    """
+    enabled: bool = True
+    experiment_name: str = "single_agent_baseline"
+    seeds: list[int] = field(default_factory=lambda: [42, 52, 62, 72, 82])
+    base_output_dir: str = "outputs/experiments"
+    save_per_seed_details: bool = False
+
 
 @dataclass
 class SimulationConfig:
@@ -36,3 +47,4 @@ class SimulationConfig:
     """
     map_config: MapConfig = field(default_factory=MapConfig)
     robot_config: RobotConfig = field(default_factory=RobotConfig)
+    batch_config: BatchConfig = field(default_factory=BatchConfig)

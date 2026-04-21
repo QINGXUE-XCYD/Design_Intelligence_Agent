@@ -13,10 +13,12 @@ class RunSaver:
     为每次仿真创建独立目录，并保存：
     - 指标结果
     - 逐步记录
+    - 详细单次运行产物
 
     Creates a dedicated directory for each simulation run and saves:
     - summary metrics
     - per-step records
+    - detailed single-run artifacts
     """
 
     @staticmethod
@@ -30,13 +32,30 @@ class RunSaver:
         return run_dir
 
     @staticmethod
+    def create_experiment_dir(base_dir: str = "outputs/experiments", experiment_name: str = "batch") -> Path:
+        """
+        创建批量实验输出目录 / Create output directory for one batch experiment
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        exp_dir = Path(base_dir) / f"{experiment_name}_{timestamp}"
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        return exp_dir
+
+    @staticmethod
+    def save_json(data: Dict | List, save_path: str | Path) -> None:
+        """
+        通用 JSON 保存接口 / Generic JSON save helper
+        """
+        save_path = Path(save_path)
+        with save_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    @staticmethod
     def save_metrics(metrics: Dict, save_path: str | Path) -> None:
         """
         保存汇总指标为 JSON / Save summary metrics as JSON
         """
-        save_path = Path(save_path)
-        with save_path.open("w", encoding="utf-8") as f:
-            json.dump(metrics, f, indent=2, ensure_ascii=False)
+        RunSaver.save_json(metrics, save_path)
 
     @staticmethod
     def save_step_records(step_records: List[Dict], save_path: str | Path) -> None:
