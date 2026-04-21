@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional, Tuple
 
-Position = Tuple[int, int]
+from environment.grid_map import Position
 
 
 class AgentMode(Enum):
@@ -24,7 +24,7 @@ class AgentState:
     """
     robot_id: int
     position: Position
-    mode: AgentMode = AgentMode.IDLE
+    mode: AgentMode = AgentMode.EXPLORING
     current_goal: Optional[Position] = None
     current_path: List[Position] = field(default_factory=list)
 

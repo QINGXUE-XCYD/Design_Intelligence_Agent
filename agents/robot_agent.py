@@ -35,14 +35,14 @@ class RobotAgent:
     """
 
     def __init__(
-        self,
-        robot_id: int,
-        start_pos: Position,
-        belief_map: OccupancyGrid,
-        sensor_model: SensorModel,
-        frontier_detector: FrontierDetector,
-        planner: PlannerBase,
-        executor: ActionExecutor,
+            self,
+            robot_id: int,
+            start_pos: Position,
+            belief_map: OccupancyGrid,
+            sensor_model: SensorModel,
+            frontier_detector: FrontierDetector,
+            planner: PlannerBase,
+            executor: ActionExecutor,
     ) -> None:
         self.state = AgentState(robot_id=robot_id, position=start_pos)
         self.state.trajectory.append(start_pos)  # 记录初始位置 / record initial position
@@ -51,6 +51,9 @@ class RobotAgent:
         self.frontier_detector = frontier_detector
         self.planner = planner
         self.executor = executor
+        # 是否已经从探索阶段切换到补扫阶段
+        # Whether the robot has switched from exploration to cleanup
+        self.in_cleanup_phase = False
 
     def _is_reachable_in_truth(self, env_map: GridMap, start: Position, goal: Position) -> bool:
         """
@@ -164,6 +167,49 @@ class RobotAgent:
 
         return None, [], "no_reachable_frontier"
 
+    def _belief_cell_is_cleaned(self, pos: Position) -> bool:
+        """
+        判断 belief map 中某个格子是否已被认为清扫过
+        Check whether a cell is believed to be cleaned
+        """
+        return self.belief_map.is_cleaned(pos)
+
+    def _get_dirty_candidates(self) -> List[Position]:
+        """
+        获取 belief map 中所有“已知为空闲但尚未清扫”的候选格子
+        Get all candidate cells that are known FREE but not yet cleaned
+        """
+        return self.belief_map.get_dirty_free_cells()
+
+    def choose_reachable_dirty_goal(self) -> tuple[Optional[Position], List[Position], str]:
+        """
+        选择一个可达的补扫目标 / Choose a reachable cleanup target
+
+        返回：
+        - goal: 选中的脏格子
+        - path: 到目标的路径
+        - reason:
+            "reachable_dirty_found"
+            "no_dirty_remaining"
+            "no_reachable_dirty"
+        """
+        dirty_cells = self._get_dirty_candidates()
+
+        if not dirty_cells:
+            return None, [], "no_dirty_remaining"
+
+        dirty_cells = sorted(
+            dirty_cells,
+            key=lambda p: self._manhattan_distance(self.state.position, p)
+        )
+
+        for cell in dirty_cells:
+            path = self.plan_path(cell)
+            if cell == self.state.position or len(path) >= 2:
+                return cell, path, "reachable_dirty_found"
+
+        return None, [], "no_reachable_dirty"
+
     def perceive(self, env_map: GridMap) -> Observation:
         """
         感知环境 / Perceive the environment
@@ -234,24 +280,50 @@ class RobotAgent:
         self.belief_map.update_cell(self.state.position, OccupancyState.FREE)
 
         if (
-            self.state.current_goal is None
-            or self.state.position == self.state.current_goal
-            or not self.state.current_path
+                self.state.current_goal is None
+                or self.state.position == self.state.current_goal
+                or not self.state.current_path
         ):
-            goal, path, reason = self.choose_reachable_goal()
-            self.state.current_goal = goal
+            # 先清空旧目标，准备重新选
+            # Clear the old goal before selecting a new one
+            self.state.current_goal = None
+            self.state.current_path = []
 
-            if goal is None:
-                self.state.mode = AgentMode.DONE
-                self.state.done_reason = reason
-                self.mark_current_cell_cleaned(env_map)
-                return
+            # =========================
+            # 阶段 1：探索 / Exploration
+            # =========================
+            if not self.in_cleanup_phase:
+                goal, path, reason = self.choose_reachable_goal()
 
-            self.state.current_path = path
-            # 调试：goal 存在，但 planner 没找到可执行路径
-            # Debug: goal exists, but planner failed to produce a usable path
-            if goal is not None and goal != self.state.position and len(self.state.current_path) < 2:
-                self._debug_frontier_failure(env_map, goal)
+                if goal is not None:
+                    self.state.current_goal = goal
+                    self.state.current_path = path
+
+                    # frontier 调试逻辑只保留在探索阶段
+                    # Keep frontier debug logic only in exploration phase
+                    if goal != self.state.position and len(self.state.current_path) < 2:
+                        self._debug_frontier_failure(env_map, goal)
+                else:
+                    # frontier 用完了，切换到补扫阶段
+                    # No reachable frontier left, switch to cleanup phase
+                    self.in_cleanup_phase = True
+
+            # =========================
+            # 阶段 2：补扫 / Cleanup
+            # =========================
+            if self.in_cleanup_phase and self.state.current_goal is None:
+                goal, path, reason = self.choose_reachable_dirty_goal()
+
+                if goal is not None:
+                    self.state.current_goal = goal
+                    self.state.current_path = path
+                else:
+                    # 没有剩余可补扫格子，真正完成任务
+                    # No remaining reachable dirty cells, coverage completed
+                    self.state.mode = AgentMode.DONE
+                    self.state.done_reason = "coverage_completed"
+                    self.mark_current_cell_cleaned(env_map)
+                    return
 
         if len(self.state.current_path) >= 2:
             self.state.mode = AgentMode.MOVING
@@ -268,6 +340,10 @@ class RobotAgent:
             if new_pos == self.state.position:
                 self.state.mode = AgentMode.BLOCKED
                 self.state.idle_steps += 1
+                # 被阻塞后清空当前目标，下一步触发重选/重规划
+                # Clear current goal when blocked so next step can reselect/replan
+                self.state.current_goal = None
+                self.state.current_path = []
             else:
                 self.state.total_path_length += 1.0
                 self.state.position = new_pos

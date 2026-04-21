@@ -2,7 +2,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import List, Tuple
 
-Position = Tuple[int, int]
+from environment.grid_map import Position
 
 
 class PlannerBase(ABC):

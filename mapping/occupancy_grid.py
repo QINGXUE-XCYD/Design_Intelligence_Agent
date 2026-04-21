@@ -2,7 +2,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import List, Tuple
 
-Position = Tuple[int, int]
+from environment.grid_map import Position
 
 
 class OccupancyState(Enum):
@@ -82,6 +82,21 @@ class OccupancyGrid:
         判断该格子是否已被观测 / Check whether a cell has been observed
         """
         return self.get_cell(pos) != OccupancyState.UNKNOWN
+
+    def get_dirty_free_cells(self) -> List[Position]:
+        """
+        获取所有“已知为空闲但尚未清扫”的格子
+        Get all cells that are known FREE but not yet cleaned
+        """
+        dirty_cells: List[Position] = []
+
+        for x in range(self.width):
+            for y in range(self.height):
+                pos = (x, y)
+                if self.get_cell(pos) == OccupancyState.FREE and not self.is_cleaned(pos):
+                    dirty_cells.append(pos)
+
+        return dirty_cells
 
     def get_neighbors(self, pos: Position) -> List[Position]:
         """

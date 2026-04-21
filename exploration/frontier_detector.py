@@ -1,8 +1,7 @@
 from typing import List, Tuple
 
+from environment.grid_map import Position
 from mapping.occupancy_grid import OccupancyGrid, OccupancyState
-
-Position = Tuple[int, int]
 
 
 class FrontierDetector:
