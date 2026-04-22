@@ -15,12 +15,13 @@ class MetricsCollector:
     def __init__(self) -> None:
         self.step_records: List[Dict] = []
 
-    def record_step(self, env_map: GridMap, agents: List[RobotAgent], step_idx: int) -> None:
+    def record_step(self, env_map: GridMap, agents: List[RobotAgent], step_idx: int, phase: str) -> None:
         """
         记录单步指标 / Record per-step metrics
         """
         self.step_records.append({
             "step": step_idx,
+            "phase": phase,
             "coverage_rate": self.compute_coverage_rate(env_map),
             "total_path_length": self.compute_total_path_length(agents),
         })
