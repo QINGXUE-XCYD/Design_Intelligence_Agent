@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
-from agents.agent_state import AgentMode, AgentState
+from agents.agent_state import AgentMode, AgentRole, AgentState
 from control.executor import ActionExecutor
+from coordination.reservation_table import GoalReservationTable
 from environment.grid_map import GridMap, Position
 from exploration.frontier_detector import FrontierDetector
 from mapping.occupancy_grid import OccupancyGrid, OccupancyState
@@ -17,21 +18,9 @@ class RobotAgent:
     """
     机器人智能体 / Robot agent
 
-    每个机器人独立维护：
-    - 自身状态
-    - 内部地图
-    - 感知模块
-    - 探索模块
-    - 路径规划模块
-    - 动作执行模块
-
-    Each robot independently maintains:
-    - its own runtime state
-    - belief map
-    - sensing module
-    - exploration module
-    - planner
-    - action execution module
+    当前版本支持固定角色协同：
+    - scout: 只负责探索开图
+    - cleaner: 只负责清扫
     """
 
     def __init__(
@@ -43,21 +32,69 @@ class RobotAgent:
             frontier_detector: FrontierDetector,
             planner: PlannerBase,
             executor: ActionExecutor,
+            role: AgentRole,
+            active: bool = True,
+            reservation_table: GoalReservationTable | None = None,
     ) -> None:
-        self.state = AgentState(robot_id=robot_id, position=start_pos)
-        self.state.trajectory.append(start_pos)  # 记录初始位置 / record initial position
+        initial_mode = AgentMode.EXPLORING if role == AgentRole.SCOUT and active else AgentMode.WAITING
+        self.state = AgentState(
+            robot_id=robot_id,
+            position=start_pos,
+            role=role,
+            mode=initial_mode,
+            activation_step=0 if active else None,
+        )
+        self.state.trajectory.append(start_pos)
+
         self.belief_map = belief_map
         self.sensor_model = sensor_model
         self.frontier_detector = frontier_detector
         self.planner = planner
         self.executor = executor
-        # 是否已经从探索阶段切换到补扫阶段
-        # Whether the robot has switched from exploration to cleanup
-        self.in_cleanup_phase = False
-        # 补扫阶段开始时对应的轨迹索引与坐标
-        # Trajectory split index and position when cleanup starts
-        self.cleanup_start_traj_index: int | None = None
+        self.reservation_table = reservation_table
+        self.active = active
+
+        self.in_cleanup_phase = role == AgentRole.CLEANER and active
+        self.cleanup_start_traj_index: int | None = 0 if self.in_cleanup_phase else None
         self.cleanup_cleaned_cells: set[Position] = set()
+
+        # 机器人知道自身起始位置，写入共享/本地地图。
+        self.belief_map.update_cell(start_pos, OccupancyState.FREE)
+
+    def activate(self, step_idx: int) -> None:
+        """
+        激活等待中的机器人 / Activate a waiting robot
+        """
+        if self.active:
+            return
+
+        self.active = True
+        self.state.activation_step = step_idx
+        self.state.mode = AgentMode.IDLE
+
+        if self.state.role == AgentRole.CLEANER:
+            self.in_cleanup_phase = True
+            self.cleanup_start_traj_index = max(0, len(self.state.trajectory) - 1)
+
+    def _reset_current_goal(self) -> None:
+        """
+        清空当前目标并释放预留 / Clear current goal and release reservation
+        """
+        if self.state.role == AgentRole.CLEANER and self.reservation_table is not None:
+            self.reservation_table.release(self.state.robot_id)
+
+        self.state.current_goal = None
+        self.state.current_path = []
+
+    def _assign_goal(self, goal: Position, path: List[Position]) -> None:
+        """
+        设置当前目标 / Assign current goal
+        """
+        self.state.current_goal = goal
+        self.state.current_path = path
+
+        if self.state.role == AgentRole.CLEANER and self.reservation_table is not None:
+            self.reservation_table.reserve(self.state.robot_id, goal)
 
     def _is_reachable_in_truth(self, env_map: GridMap, start: Position, goal: Position) -> bool:
         """
@@ -91,10 +128,6 @@ class RobotAgent:
     def _is_reachable_in_belief(self, start: Position, goal: Position) -> bool:
         """
         在 belief map 上检查可达性 / Check reachability on the belief map
-
-        这里直接复用 planner：
-        - 若 path 长度 >= 2，则视为可达
-        - 若 start == goal，也视为可达
         """
         if start == goal:
             return True
@@ -143,27 +176,17 @@ class RobotAgent:
     def choose_reachable_goal(self) -> tuple[Optional[Position], List[Position], str]:
         """
         选择一个可达的 frontier 目标 / Choose a reachable frontier goal
-
-        返回：
-        - goal: 选中的目标
-        - path: 到目标的路径
-        - reason:
-            "reachable_frontier_found"
-            "no_frontier_available"
-            "no_reachable_frontier"
         """
         frontiers = self.frontier_detector.detect(self.belief_map)
 
         if not frontiers:
             return None, [], "no_frontier_available"
 
-        # 先按距离排序 / Sort by distance first
         frontiers = sorted(
             frontiers,
             key=lambda p: self._manhattan_distance(self.state.position, p)
         )
 
-        # 逐个测试可达性 / Test reachability one by one
         for frontier in frontiers:
             path = self.plan_path(frontier)
             if frontier == self.state.position or len(path) >= 2:
@@ -171,43 +194,38 @@ class RobotAgent:
 
         return None, [], "no_reachable_frontier"
 
-    def _belief_cell_is_cleaned(self, pos: Position) -> bool:
-        """
-        判断 belief map 中某个格子是否已被认为清扫过
-        Check whether a cell is believed to be cleaned
-        """
-        return self.belief_map.is_cleaned(pos)
-
     def _get_dirty_candidates(self) -> List[Position]:
         """
-        获取 belief map 中所有“已知为空闲但尚未清扫”的候选格子
-        Get all candidate cells that are known FREE but not yet cleaned
+        获取 belief map 中所有已知但尚未清扫的自由格子
+        Get all dirty free cells from the current belief map
         """
         return self.belief_map.get_dirty_free_cells()
 
     def choose_reachable_dirty_goal(self) -> tuple[Optional[Position], List[Position], str]:
         """
         选择一个可达的补扫目标 / Choose a reachable cleanup target
-
-        返回：
-        - goal: 选中的脏格子
-        - path: 到目标的路径
-        - reason:
-            "reachable_dirty_found"
-            "no_dirty_remaining"
-            "no_reachable_dirty"
         """
         dirty_cells = self._get_dirty_candidates()
 
         if not dirty_cells:
             return None, [], "no_dirty_remaining"
 
-        dirty_cells = sorted(
-            dirty_cells,
+        available_cells = [
+            cell
+            for cell in dirty_cells
+            if self.reservation_table is None
+            or not self.reservation_table.is_reserved_by_other(cell, self.state.robot_id)
+        ]
+
+        if not available_cells:
+            return None, [], "all_dirty_reserved"
+
+        available_cells = sorted(
+            available_cells,
             key=lambda p: self._manhattan_distance(self.state.position, p)
         )
 
-        for cell in dirty_cells:
+        for cell in available_cells:
             path = self.plan_path(cell)
             if cell == self.state.position or len(path) >= 2:
                 return cell, path, "reachable_dirty_found"
@@ -233,18 +251,6 @@ class RobotAgent:
         for pos in observation.dynamic_cells:
             self.belief_map.update_cell(pos, OccupancyState.OCCUPIED)
 
-    def choose_goal(self) -> Optional[Position]:
-        """
-        选择目标 / Choose a target goal
-
-        第一阶段：选择第一个 frontier 作为目标。
-        Phase 1: choose the first detected frontier as the goal.
-        """
-        frontiers = self.frontier_detector.detect(self.belief_map)
-        if not frontiers:
-            return None
-        return frontiers[0]
-
     def plan_path(self, goal: Position) -> List[Position]:
         """
         规划到目标的路径 / Plan a path to the selected goal
@@ -255,88 +261,21 @@ class RobotAgent:
         """
         清扫当前位置 / Clean the current cell
         """
+        if self.state.role != AgentRole.CLEANER:
+            return
+
         pos = self.state.position
         if not env_map.is_cleaned(pos):
             env_map.mark_cleaned(pos)
             self.belief_map.mark_cleaned(pos)
             self.state.cleaned_cells += 1
-            # 记录 cleanup 阶段首次清扫到的格子
-            # Record cells first cleaned during cleanup phase
-            if getattr(self, 'in_cleanup_phase', False):
+            if self.in_cleanup_phase:
                 self.cleanup_cleaned_cells.add(pos)
 
-    def step(self, env_map: GridMap) -> None:
+    def _execute_move_step(self, env_map: GridMap, allow_cleaning: bool) -> None:
         """
-        单步决策与执行 / One decision-execution cycle
-
-        Phase 1 flow:
-        1. sense
-        2. update belief
-        3. choose goal if needed
-        4. plan path if needed
-        5. move one step
-        6. clean current cell
+        执行一步移动 / Execute one movement step
         """
-        # 如果已经 DONE，则不再执行 / If already done, do nothing
-        if self.state.mode == AgentMode.DONE:
-            return
-        self.state.steps_taken += 1
-
-        observation = self.perceive(env_map)
-        self.update_belief(observation)
-
-        self.belief_map.update_cell(self.state.position, OccupancyState.FREE)
-
-        if (
-                self.state.current_goal is None
-                or self.state.position == self.state.current_goal
-                or not self.state.current_path
-        ):
-            # 先清空旧目标，准备重新选
-            # Clear the old goal before selecting a new one
-            self.state.current_goal = None
-            self.state.current_path = []
-
-            # =========================
-            # 阶段 1：探索 / Exploration
-            # =========================
-            if not self.in_cleanup_phase:
-                goal, path, reason = self.choose_reachable_goal()
-
-                if goal is not None:
-                    self.state.current_goal = goal
-                    self.state.current_path = path
-
-                    # frontier 调试逻辑只保留在探索阶段
-                    # Keep frontier debug logic only in exploration phase
-                    if goal != self.state.position and len(self.state.current_path) < 2:
-                        self._debug_frontier_failure(env_map, goal)
-                else:
-                    # frontier 用完了，切换到补扫阶段
-                    # No reachable frontier left, switch to cleanup phase
-                    self.in_cleanup_phase = True
-                    # 记录 explore -> cleanup 的切换点
-                    # Record the switch point from exploration to cleanup
-                    if self.cleanup_start_traj_index is None:
-                        self.cleanup_start_traj_index = max(0, len(self.state.trajectory) - 1)
-
-            # =========================
-            # 阶段 2：补扫 / Cleanup
-            # =========================
-            if self.in_cleanup_phase and self.state.current_goal is None:
-                goal, path, reason = self.choose_reachable_dirty_goal()
-
-                if goal is not None:
-                    self.state.current_goal = goal
-                    self.state.current_path = path
-                else:
-                    # 没有剩余可补扫格子，真正完成任务
-                    # No remaining reachable dirty cells, coverage completed
-                    self.state.mode = AgentMode.DONE
-                    self.state.done_reason = "coverage_completed"
-                    self.mark_current_cell_cleaned(env_map)
-                    return
-
         if len(self.state.current_path) >= 2:
             self.state.mode = AgentMode.MOVING
             action = self.executor.next_action_from_path(
@@ -352,17 +291,116 @@ class RobotAgent:
             if new_pos == self.state.position:
                 self.state.mode = AgentMode.BLOCKED
                 self.state.idle_steps += 1
-                # 被阻塞后清空当前目标，下一步触发重选/重规划
-                # Clear current goal when blocked so next step can reselect/replan
-                self.state.current_goal = None
-                self.state.current_path = []
-            else:
-                self.state.total_path_length += 1.0
-                self.state.position = new_pos
-                self.state.trajectory.append(new_pos)  # 记录轨迹 / append trajectory
-                self.state.current_path = self.state.current_path[1:]
-        else:
-            self.state.mode = AgentMode.IDLE
-            self.state.idle_steps += 1
+                self._reset_current_goal()
+                return
 
-        self.mark_current_cell_cleaned(env_map)
+            self.state.total_path_length += 1.0
+            self.state.position = new_pos
+            self.state.trajectory.append(new_pos)
+            self.state.current_path = self.state.current_path[1:]
+
+            if allow_cleaning:
+                self.mark_current_cell_cleaned(env_map)
+                if self.state.current_goal == self.state.position and self.belief_map.is_cleaned(self.state.position):
+                    self._reset_current_goal()
+            return
+
+        if allow_cleaning and not env_map.is_cleaned(self.state.position):
+            self.state.mode = AgentMode.CLEANING
+            self.mark_current_cell_cleaned(env_map)
+            if self.state.current_goal == self.state.position:
+                self._reset_current_goal()
+            return
+
+        self.state.mode = AgentMode.IDLE
+        self.state.idle_steps += 1
+
+    def _step_as_scout(self, env_map: GridMap) -> None:
+        """
+        侦察机器人单步逻辑 / One step for the scout robot
+        """
+        if (
+                self.state.current_goal is None
+                or self.state.position == self.state.current_goal
+                or not self.state.current_path
+        ):
+            self._reset_current_goal()
+            goal, path, reason = self.choose_reachable_goal()
+
+            if goal is None:
+                self.state.mode = AgentMode.DONE
+                self.state.done_reason = (
+                    "scouting_completed"
+                    if reason == "no_frontier_available"
+                    else reason
+                )
+                return
+
+            self._assign_goal(goal, path)
+
+            if goal != self.state.position and len(self.state.current_path) < 2:
+                self._debug_frontier_failure(env_map, goal)
+
+        self._execute_move_step(env_map, allow_cleaning=False)
+        if self.state.mode not in (AgentMode.MOVING, AgentMode.BLOCKED, AgentMode.DONE):
+            self.state.mode = AgentMode.EXPLORING
+
+    def _step_as_cleaner(self, env_map: GridMap) -> None:
+        """
+        清扫机器人单步逻辑 / One step for a cleaner robot
+        """
+        if self.state.current_goal is not None and self.belief_map.is_cleaned(self.state.current_goal):
+            self._reset_current_goal()
+
+        if (
+                self.state.current_goal is None
+                or self.state.position == self.state.current_goal
+                or not self.state.current_path
+        ):
+            self._reset_current_goal()
+            goal, path, reason = self.choose_reachable_dirty_goal()
+
+            if goal is None:
+                if reason == "no_dirty_remaining":
+                    self.state.mode = AgentMode.DONE
+                    self.state.done_reason = "coverage_completed"
+                elif reason == "all_dirty_reserved":
+                    self.state.mode = AgentMode.WAITING
+                    self.state.idle_steps += 1
+                else:
+                    self.state.mode = AgentMode.BLOCKED
+                    self.state.idle_steps += 1
+                    self.state.done_reason = reason
+                return
+
+            self._assign_goal(goal, path)
+
+            if goal == self.state.position:
+                self.state.mode = AgentMode.CLEANING
+                self.mark_current_cell_cleaned(env_map)
+                self._reset_current_goal()
+                return
+
+        self._execute_move_step(env_map, allow_cleaning=True)
+
+    def step(self, env_map: GridMap) -> None:
+        """
+        单步决策与执行 / One decision-execution cycle
+        """
+        if self.state.mode == AgentMode.DONE:
+            return
+
+        if not self.active:
+            self.state.mode = AgentMode.WAITING
+            return
+
+        self.state.steps_taken += 1
+
+        observation = self.perceive(env_map)
+        self.update_belief(observation)
+        self.belief_map.update_cell(self.state.position, OccupancyState.FREE)
+
+        if self.state.role == AgentRole.SCOUT:
+            self._step_as_scout(env_map)
+        else:
+            self._step_as_cleaner(env_map)

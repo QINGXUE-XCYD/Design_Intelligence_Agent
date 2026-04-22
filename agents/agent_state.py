@@ -1,14 +1,23 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from environment.grid_map import Position
+
+
+class AgentRole(Enum):
+    """
+    机器人角色 / Robot role
+    """
+    SCOUT = "scout"
+    CLEANER = "cleaner"
 
 
 class AgentMode(Enum):
     """
     机器人当前状态 / Current mode of a robot agent
     """
+    WAITING = "waiting"
     IDLE = "idle"
     EXPLORING = "exploring"
     MOVING = "moving"
@@ -24,6 +33,7 @@ class AgentState:
     """
     robot_id: int
     position: Position
+    role: AgentRole = AgentRole.CLEANER
     mode: AgentMode = AgentMode.EXPLORING
     current_goal: Optional[Position] = None
     current_path: List[Position] = field(default_factory=list)
@@ -37,3 +47,4 @@ class AgentState:
     trajectory: List[Position] = field(default_factory=list)
     # 新增：agent 自身结束原因 / Added: per-agent termination reason
     done_reason: Optional[str] = None
+    activation_step: Optional[int] = None
