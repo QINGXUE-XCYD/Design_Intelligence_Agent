@@ -1,18 +1,20 @@
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
-from environment.grid_map import Position
+Position = Tuple[int, int]
 
 
 @dataclass
 class Observation:
     """
-    一次局部观测结果 / One local observation result
+    一次局部观测结果 / One local observation result.
 
-    将感知结果与地图更新解耦。
-    Decouples sensing result from map updating.
+    charging_cells records charging stations that are actually visible to the
+    robot. This lets public chargers be discovered during exploration instead
+    of being globally known from the start.
     """
     visible_cells: List[Position] = field(default_factory=list)
     free_cells: List[Position] = field(default_factory=list)
     occupied_cells: List[Position] = field(default_factory=list)
     dynamic_cells: List[Position] = field(default_factory=list)
+    charging_cells: List[Position] = field(default_factory=list)

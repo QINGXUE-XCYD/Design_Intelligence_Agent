@@ -1,29 +1,21 @@
 from __future__ import annotations
+from collections import defaultdict
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
+from matplotlib import animation
 import numpy as np
-from matplotlib.patches import Rectangle
 
 from agents.robot_agent import RobotAgent
 from environment.grid_map import GridMap
-from mapping.occupancy_grid import OccupancyState
-from planning import astar_planner
+
+Position = Tuple[int, int]
 
 
 class MapRenderer:
     """
-    地图渲染器 / Map renderer
-
-    总览图布局：
-    - 第一行：初始地图 + 每个机器人的轨迹图
-    - 第二行：共享 belief 叠加图 + 每个机器人的 belief map
-
-    Overview layout:
-    - Row 1: initial map + one trajectory panel per robot
-    - Row 2: shared belief overlay + one belief-map panel per robot
+    地图渲染器 / Map renderer.
     """
 
     def render_run_overview(
@@ -32,29 +24,18 @@ class MapRenderer:
         agents: List[RobotAgent],
         save_path: str | Path,
     ) -> None:
-        """
-        保存总览图 / Save the run overview figure
-
-        布局：
-        2 rows x (1 + number_of_agents) columns
-        """
         n_panels = 1 + len(agents)
-
         fig, axes = plt.subplots(
-            2,
+            1,
             n_panels,
-            figsize=(6 * n_panels, 12),
+            figsize=(6 * n_panels, 6),
             squeeze=False,
         )
+        axes = axes[0]
 
-        # =========================
-        # 第一行 / Row 1
-        # =========================
-
-        # (0, 0): Initial Map
-        initial_canvas = self._build_env_canvas(env_map, show_cleaned=False)
+        initial_canvas = self._build_canvas(env_map, show_cleaned=False)
         self._draw_background(
-            ax=axes[0, 0],
+            ax=axes[0],
             canvas=initial_canvas,
             env_map=env_map,
             title="Initial Map",
@@ -62,88 +43,29 @@ class MapRenderer:
         for idx, agent in enumerate(agents):
             color = self._get_agent_color(idx)
             sx, sy = agent.state.trajectory[0]
-            axes[0, 0].scatter(
-                sx,
-                sy,
+            axes[0].scatter(
+                sx, sy,
                 marker="o",
                 s=80,
                 color=color,
-                label=f"Robot {agent.state.robot_id} start",
+                label=f"Robot {agent.state.robot_id} start"
             )
-        axes[0, 0].legend(loc="upper right")
+        axes[0].legend(loc="upper right")
 
-        # (0, i): Trajectory per robot
         for idx, agent in enumerate(agents, start=1):
-            final_canvas = self._build_env_canvas(env_map, show_cleaned=True)
+            final_canvas = self._build_canvas(env_map, show_cleaned=True)
             self._draw_background(
-                ax=axes[0, idx],
+                ax=axes[idx],
                 canvas=final_canvas,
                 env_map=env_map,
                 title=f"Robot {agent.state.robot_id} Trajectory",
             )
-            color = self._get_agent_color(idx - 1)
-            self._draw_cleanup_hatching(
-                ax=axes[0, idx],
-                cleanup_cells=self._get_cleanup_cleaned_cells(agent),
-                hatch_color=color,
-            )
             self._draw_agent_trajectory(
-                ax=axes[0, idx],
+                ax=axes[idx],
                 agent=agent,
-                color=color,
+                color=self._get_agent_color(idx - 1),
             )
-            axes[0, idx].legend(loc="upper right")
-
-        # =========================
-        # 第二行 / Row 2
-        # =========================
-
-        # (1, 0): Shared Belief Overlay
-        shared_belief_canvas = self._build_shared_belief_canvas(agents, env_map)
-        self._draw_background(
-            ax=axes[1, 0],
-            canvas=shared_belief_canvas,
-            env_map=env_map,
-            title="Shared Belief Map (Overlay)",
-        )
-
-        for idx, agent in enumerate(agents):
-            color = self._get_agent_color(idx)
-            sx, sy = self._get_agent_start_position(agent)
-            axes[1, 0].scatter(
-                sx,
-                sy,
-                marker="o",
-                s=70,
-                color=color,
-                label=f"Robot {agent.state.robot_id} start",
-            )
-        axes[1, 0].legend(loc="upper right")
-
-        # (1, i): Individual Belief Map
-        for idx, agent in enumerate(agents, start=1):
-            color = self._get_agent_color(idx - 1)
-            belief_canvas = self._build_single_belief_canvas(
-                agent=agent,
-                color=color,
-                env_map=env_map,
-            )
-
-            self._draw_background(
-                ax=axes[1, idx],
-                canvas=belief_canvas,
-                env_map=env_map,
-                title=f"Robot {agent.state.robot_id} Belief Map",
-            )
-
-            sx, sy = self._get_agent_start_position(agent)
-            axes[1, idx].scatter(
-                sx,
-                sy,
-                marker="o",
-                s=70,
-                color=color,
-            )
+            axes[idx].legend(loc="upper right")
 
         fig.tight_layout()
         fig.savefig(save_path, dpi=200)
@@ -155,9 +77,6 @@ class MapRenderer:
         save_path: str | Path,
         title: str = "Coverage Rate Over Time",
     ) -> None:
-        """
-        保存覆盖率曲线 / Save coverage-rate curve
-        """
         if not step_records:
             return
 
@@ -175,14 +94,177 @@ class MapRenderer:
         fig.savefig(save_path, dpi=200)
         plt.close(fig)
 
-    # =========================================================
-    # 基础环境图 / Environment map canvas
-    # =========================================================
+    def plot_battery_curve(
+        self,
+        step_records: List[dict],
+        save_path: str | Path,
+        title: str = "Battery Level Over Time",
+    ) -> None:
+        """
+        Plot mean/min battery curves when battery is enabled.
+        """
+        records = [
+            r for r in step_records
+            if r.get("mean_battery_level") not in ("", None)
+        ]
+        if not records:
+            return
 
-    def _build_env_canvas(self, env_map: GridMap, show_cleaned: bool) -> np.ndarray:
+        steps = [r["step"] for r in records]
+        mean_battery = [r["mean_battery_level"] for r in records]
+        min_battery = [r["min_battery_level"] for r in records]
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.plot(steps, mean_battery, linewidth=2, label="Mean battery")
+        ax.plot(steps, min_battery, linewidth=2, linestyle="--", label="Minimum battery")
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Battery Level")
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        fig.tight_layout()
+        fig.savefig(save_path, dpi=200)
+        plt.close(fig)
+
+    def render_cleaning_animation(
+        self,
+        env_map: GridMap,
+        agents: List[RobotAgent],
+        step_records: List[Dict],
+        agent_step_records: List[Dict],
+        save_path: str | Path,
+        fps: int = 4,
+        max_frames: int = 250,
+    ) -> None:
         """
-        构造环境地图画布 / Build RGB canvas for environment map
+        保存清扫过程 GIF 动图。
+
+        The animation shows cleaned cells, robot positions, trajectories, charging
+        stations, coverage, and battery percentage when battery is enabled.
         """
+        if not step_records or not agent_step_records:
+            return
+
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        step_to_agent_records: Dict[int, List[Dict]] = defaultdict(list)
+        for record in agent_step_records:
+            step_to_agent_records[int(record["step"])].append(record)
+
+        robot_ids = sorted({int(r["robot_id"]) for r in agent_step_records})
+        start_positions = {agent.state.robot_id: agent.state.trajectory[0] for agent in agents}
+
+        raw_frames = [int(r["step"]) for r in step_records]
+        stride = max(1, int(np.ceil(len(raw_frames) / max(1, max_frames))))
+        frames = raw_frames[::stride]
+        if raw_frames[-1] not in frames:
+            frames.append(raw_frames[-1])
+
+        cumulative_paths: Dict[int, List[Position]] = {rid: [start_positions[rid]] for rid in robot_ids}
+        cumulative_cleaned: set[Position] = set(start_positions.values())
+
+        cleaned_by_frame: Dict[int, set[Position]] = {}
+        paths_by_frame: Dict[int, Dict[int, List[Position]]] = {}
+        pos_by_frame: Dict[int, Dict[int, Position]] = {}
+        battery_by_frame: Dict[int, Dict[int, str]] = {}
+        coverage_by_frame: Dict[int, float] = {int(r["step"]): float(r["coverage_rate"]) for r in step_records}
+
+        frame_set = set(frames)
+        for step in raw_frames:
+            current_positions: Dict[int, Position] = {}
+            current_batteries: Dict[int, str] = {}
+
+            for rec in step_to_agent_records.get(step, []):
+                rid = int(rec["robot_id"])
+                pos = (int(rec["x"]), int(rec["y"]))
+                current_positions[rid] = pos
+                if cumulative_paths[rid][-1] != pos:
+                    cumulative_paths[rid].append(pos)
+                cumulative_cleaned.add(pos)
+
+                bp = rec.get("battery_percent", "")
+                if bp == "" or bp is None:
+                    current_batteries[rid] = ""
+                else:
+                    try:
+                        current_batteries[rid] = f"{float(bp):.0%}"
+                    except Exception:
+                        current_batteries[rid] = ""
+
+            for rid in robot_ids:
+                current_positions.setdefault(rid, cumulative_paths[rid][-1])
+                current_batteries.setdefault(rid, "")
+
+            if step in frame_set:
+                cleaned_by_frame[step] = set(cumulative_cleaned)
+                paths_by_frame[step] = {rid: list(cumulative_paths[rid]) for rid in robot_ids}
+                pos_by_frame[step] = dict(current_positions)
+                battery_by_frame[step] = dict(current_batteries)
+
+        fig, ax = plt.subplots(figsize=(7, 7))
+        image = ax.imshow(self._build_canvas_from_cleaned(env_map, cleaned_by_frame[frames[0]]), origin="lower")
+        self._style_animation_axis(ax, env_map)
+
+        # Charging stations.
+        if env_map.charging_stations:
+            xs = [p[0] for p in env_map.charging_stations]
+            ys = [p[1] for p in env_map.charging_stations]
+            ax.scatter(xs, ys, marker="s", s=130, facecolors="none", edgecolors="green", linewidths=2, label="Charger")
+
+        robot_artists = {}
+        trail_artists = {}
+        text_artists = {}
+        for idx, rid in enumerate(robot_ids):
+            color = self._get_agent_color(idx)
+            line, = ax.plot([], [], linewidth=2, alpha=0.85, color=color)
+            trail_artists[rid] = line
+            scatter = ax.scatter([], [], marker="o", s=90, color=color, label=f"Robot {rid}")
+            robot_artists[rid] = scatter
+            text_artists[rid] = ax.text(0, 0, "", fontsize=8, ha="center", va="bottom")
+
+        title_artist = ax.set_title("")
+        ax.legend(loc="upper right")
+
+        def update(frame_index: int):
+            step = frames[frame_index]
+            image.set_data(self._build_canvas_from_cleaned(env_map, cleaned_by_frame[step]))
+
+            for rid in robot_ids:
+                trail = paths_by_frame[step][rid]
+                if trail:
+                    xs = [p[0] for p in trail]
+                    ys = [p[1] for p in trail]
+                    trail_artists[rid].set_data(xs, ys)
+
+                pos = pos_by_frame[step][rid]
+                robot_artists[rid].set_offsets(np.array([[pos[0], pos[1]]], dtype=float))
+
+                battery_text = battery_by_frame[step].get(rid, "")
+                label = f"R{rid}" + (f" {battery_text}" if battery_text else "")
+                text_artists[rid].set_position((pos[0], pos[1] + 0.35))
+                text_artists[rid].set_text(label)
+
+            coverage = coverage_by_frame.get(step, 0.0)
+            title_artist.set_text(f"Cleaning Progress | Step {step} | Coverage {coverage:.1%}")
+            return [image, title_artist, *trail_artists.values(), *robot_artists.values(), *text_artists.values()]
+
+        anim = animation.FuncAnimation(
+            fig,
+            update,
+            frames=len(frames),
+            interval=max(1, int(1000 / max(1, fps))),
+            blit=False,
+            repeat=False,
+        )
+        try:
+            writer = animation.PillowWriter(fps=fps)
+            anim.save(str(save_path), writer=writer)
+        finally:
+            plt.close(fig)
+
+    def _build_canvas(self, env_map: GridMap, show_cleaned: bool) -> np.ndarray:
         canvas = np.ones((env_map.height, env_map.width, 3), dtype=float)
 
         for x in range(env_map.width):
@@ -195,109 +277,31 @@ class MapRenderer:
                     canvas[y, x] = [1.0, 0.6, 0.0]
                 elif show_cleaned and pos in env_map.cleaned_cells:
                     canvas[y, x] = [0.80, 0.92, 1.00]
+                elif pos in env_map.charging_stations:
+                    canvas[y, x] = [0.88, 1.00, 0.88]
                 else:
                     canvas[y, x] = [1.0, 1.0, 1.0]
 
         return canvas
 
-    # =========================================================
-    # belief map 可视化 / Belief map visualisation
-    # =========================================================
-
-    def _build_single_belief_canvas(
-        self,
-        agent: RobotAgent,
-        color: str,
-        env_map: GridMap,
-    ) -> np.ndarray:
-        """
-        构造单个机器人的 belief map 画布
-        Build a canvas for one robot's belief map
-        """
+    def _build_canvas_from_cleaned(self, env_map: GridMap, cleaned_cells: set[Position]) -> np.ndarray:
         canvas = np.ones((env_map.height, env_map.width, 3), dtype=float)
-        rgb = np.array(mcolors.to_rgb(color), dtype=float)
-
-        unknown_color = np.array([0.95, 0.95, 0.95], dtype=float)
-        free_tint = 0.55 * np.ones(3) + 0.45 * rgb
-        occupied_color = np.array([0.0, 0.0, 0.0], dtype=float)
-
         for x in range(env_map.width):
             for y in range(env_map.height):
-                state = self._get_belief_state(agent, (x, y))
-
-                if state == OccupancyState.UNKNOWN:
-                    canvas[y, x] = unknown_color
-                elif state == OccupancyState.FREE:
-                    canvas[y, x] = free_tint
-                elif state == OccupancyState.OCCUPIED:
-                    canvas[y, x] = occupied_color
+                pos = (x, y)
+                if pos in env_map.static_obstacles:
+                    canvas[y, x] = [0.0, 0.0, 0.0]
+                elif pos in env_map.dynamic_obstacles:
+                    canvas[y, x] = [1.0, 0.6, 0.0]
+                elif pos in cleaned_cells:
+                    canvas[y, x] = [0.80, 0.92, 1.00]
+                elif pos in env_map.charging_stations:
+                    canvas[y, x] = [0.88, 1.00, 0.88]
                 else:
-                    canvas[y, x] = unknown_color
-
+                    canvas[y, x] = [1.0, 1.0, 1.0]
         return canvas
-
-    def _build_shared_belief_canvas(
-        self,
-        agents: List[RobotAgent],
-        env_map: GridMap,
-    ) -> np.ndarray:
-        """
-        构造所有机器人 belief map 的叠加图
-        Build an overlay canvas for all robots' belief maps
-
-        规则：
-        - 任何机器人认为 OCCUPIED -> 黑色
-        - 一个或多个机器人认为 FREE -> 颜色平均混合
-        - 全 UNKNOWN -> 浅灰
-        """
-        canvas = np.ones((env_map.height, env_map.width, 3), dtype=float)
-        unknown_color = np.array([0.95, 0.95, 0.95], dtype=float)
-        occupied_color = np.array([0.0, 0.0, 0.0], dtype=float)
-
-        robot_colors = [
-            np.array(mcolors.to_rgb(self._get_agent_color(i)), dtype=float)
-            for i in range(len(agents))
-        ]
-
-        for x in range(env_map.width):
-            for y in range(env_map.height):
-                free_colors = []
-                has_occupied = False
-
-                for i, agent in enumerate(agents):
-                    state = self._get_belief_state(agent, (x, y))
-
-                    if state == OccupancyState.OCCUPIED:
-                        has_occupied = True
-                    elif state == OccupancyState.FREE:
-                        free_colors.append(robot_colors[i])
-
-                if has_occupied:
-                    canvas[y, x] = occupied_color
-                elif free_colors:
-                    mean_color = np.mean(np.stack(free_colors, axis=0), axis=0)
-                    # 和白色混合一下，保持浅色 / Blend with white for a softer overlay
-                    canvas[y, x] = 0.50 * np.ones(3) + 0.50 * mean_color
-                else:
-                    canvas[y, x] = unknown_color
-
-        return canvas
-
-    def _get_belief_state(self, agent: RobotAgent, pos: Tuple[int, int]) -> OccupancyState:
-        """
-        读取某个机器人 belief map 上某格的状态
-        Read one cell state from a robot belief map
-        """
-        return agent.belief_map.get_cell(pos)
-
-    # =========================================================
-    # 绘图辅助 / Plot helpers
-    # =========================================================
 
     def _draw_background(self, ax, canvas: np.ndarray, env_map: GridMap, title: str) -> None:
-        """
-        绘制地图背景 / Draw map background
-        """
         ax.imshow(canvas, origin="lower")
         ax.set_title(title)
         ax.set_xlim(-0.5, env_map.width - 0.5)
@@ -307,134 +311,29 @@ class MapRenderer:
         ax.grid(True, which="both", color="lightgray", linewidth=0.5, alpha=0.5)
         ax.set_aspect("equal")
 
-    def _get_agent_start_position(self, agent: RobotAgent) -> Tuple[int, int]:
-        """
-        获取机器人起点 / Get robot start position
-        """
-        if agent.state.trajectory:
-            return agent.state.trajectory[0]
-        return agent.state.position
-
-    def _get_cleanup_split_index(self, agent: RobotAgent) -> int | None:
-        """
-        获取 explore -> cleanup 的轨迹切换点索引
-        Get the trajectory split index from exploration to cleanup
-        """
-        value = getattr(agent, "cleanup_start_traj_index", None)
-        if value is None:
-            value = getattr(agent.state, "cleanup_start_traj_index", None)
-        return value
-
-    def _get_cleanup_cleaned_cells(self, agent: RobotAgent) -> List[Tuple[int, int]]:
-        """
-        获取 cleanup 阶段首次清扫到的格子
-        Get cells first cleaned during cleanup phase
-        """
-        value = getattr(agent, "cleanup_cleaned_cells", None)
-        if value is None:
-            value = getattr(agent.state, "cleanup_cleaned_cells", None)
-        if value is None:
-            return []
-        return list(value)
-
-    def _draw_cleanup_hatching(self, ax, cleanup_cells: List[Tuple[int, int]], hatch_color: str) -> None:
-        """
-        在 cleanup 阶段首次清扫到的格子上叠加斜线填充
-        Overlay hatched rectangles on cells first cleaned during cleanup
-        """
-        hatch_rgba = mcolors.to_rgba(hatch_color, alpha= 0.45)
-        for x, y in cleanup_cells:
-            rect = Rectangle(
-                (x - 0.5, y - 0.5),
-                1.0,
-                1.0,
-                facecolor=(1.0, 1.0, 1.0, 0.0),
-                edgecolor=hatch_rgba,
-                linewidth=0.0,
-                hatch='///',
-                zorder=2,
-            )
-            ax.add_patch(rect)
+    def _style_animation_axis(self, ax, env_map: GridMap) -> None:
+        ax.set_xlim(-0.5, env_map.width - 0.5)
+        ax.set_ylim(-0.5, env_map.height - 0.5)
+        ax.set_xticks(range(env_map.width))
+        ax.set_yticks(range(env_map.height))
+        ax.grid(True, which="both", color="lightgray", linewidth=0.5, alpha=0.5)
+        ax.set_aspect("equal")
 
     def _draw_agent_trajectory(self, ax, agent: RobotAgent, color: str) -> None:
-        """
-        绘制单个机器人的轨迹，并区分 exploration / cleanup
-        Draw one robot trajectory with exploration / cleanup separation
-        """
         traj = agent.state.trajectory
         if not traj:
             return
 
-        split_idx = self._get_cleanup_split_index(agent)
-        robot_id = agent.state.robot_id
+        xs = [p[0] for p in traj]
+        ys = [p[1] for p in traj]
 
-        if split_idx is None:
-            xs = [p[0] for p in traj]
-            ys = [p[1] for p in traj]
-            ax.plot(
-                xs,
-                ys,
-                linewidth=2.0,
-                alpha=0.85,
-                color=color,
-                linestyle='-',
-                label=f"Robot {robot_id} trajectory",
-                zorder=3,
-            )
-        else:
-            split_idx = max(0, min(split_idx, len(traj) - 1))
-            explore_traj = traj[: split_idx + 1]
-            cleanup_traj = traj[split_idx:]
-
-            if len(explore_traj) >= 2:
-                exs = [p[0] for p in explore_traj]
-                eys = [p[1] for p in explore_traj]
-                ax.plot(
-                    exs,
-                    eys,
-                    linewidth=1.8,
-                    alpha=0.80,
-                    color=color,
-                    linestyle='-',
-                    label=f"Robot {robot_id} explore",
-                    zorder=3,
-                )
-
-            if len(cleanup_traj) >= 2:
-                cxs = [p[0] for p in cleanup_traj]
-                cys = [p[1] for p in cleanup_traj]
-                ax.plot(
-                    cxs,
-                    cys,
-                    linewidth=2.8,
-                    alpha=0.95,
-                    color=color,
-                    linestyle='--',
-                    label=f"Robot {robot_id} cleanup",
-                    zorder=4,
-                )
-
-            switch_x, switch_y = traj[split_idx]
-            ax.scatter(
-                switch_x,
-                switch_y,
-                marker='D',
-                s=80,
-                color=color,
-                edgecolors='white',
-                linewidths=1.0,
-                label='phase switch',
-                zorder=5,
-            )
+        ax.plot(xs, ys, linewidth=2, alpha=0.9, color=color, label=f"Robot {agent.state.robot_id}")
 
         sx, sy = traj[0]
         ex, ey = traj[-1]
-        ax.scatter(sx, sy, marker='o', s=70, color=color, zorder=6)
-        ax.scatter(ex, ey, marker='x', s=90, color=color, zorder=6)
+        ax.scatter(sx, sy, marker="o", s=70, color=color)
+        ax.scatter(ex, ey, marker="x", s=90, color=color)
 
     def _get_agent_color(self, idx: int) -> str:
-        """
-        获取机器人颜色 / Get agent color from matplotlib cycle
-        """
         color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
         return color_cycle[idx % len(color_cycle)]

@@ -1,17 +1,19 @@
-from typing import Dict, List
+from __future__ import annotations
+import random
+from collections import defaultdict
+from typing import Dict, List, Optional, Set
 
 from agents.agent_state import AgentMode
 from agents.robot_agent import RobotAgent
-from environment.grid_map import GridMap
+from environment.dynamic_obstacles import RandomWalkDynamicObstaclePolicy
+from environment.grid_map import GridMap, Position
+from mapping.occupancy_grid import OccupancyGrid
 from metrics.collector import MetricsCollector
 
 
 class SimulationEngine:
     """
-    仿真主引擎 / Main simulation engine
-
-    负责控制每个 step 的执行顺序。
-    Responsible for controlling the execution order of each simulation step.
+    仿真主引擎 / Main simulation engine.
     """
 
     def __init__(
@@ -20,120 +22,143 @@ class SimulationEngine:
         agents: List[RobotAgent],
         metrics_collector: MetricsCollector,
         max_steps: int,
+        target_coverage: float = 0.95,
+        coordination_strategy: str = "independent",
+        communication_interval: int = 1,
+        communication_loss_rate: float = 0.0,
+        charging_station_capacity: int = 1,
+        dynamic_obstacle_policy: Optional[RandomWalkDynamicObstaclePolicy] = None,
+        random_seed: int = 0,
     ) -> None:
         self.env_map = env_map
         self.agents = agents
         self.metrics_collector = metrics_collector
         self.max_steps = max_steps
+        self.target_coverage = target_coverage
+        self.coordination_strategy = coordination_strategy
+        self.communication_interval = max(1, communication_interval)
+        self.communication_loss_rate = max(0.0, min(1.0, communication_loss_rate))
+        self.charging_station_capacity = max(1, charging_station_capacity)
+        self.dynamic_obstacle_policy = dynamic_obstacle_policy
+        self.rng = random.Random(random_seed)
+
         self.current_step = 0
-        self.termination_reason = None
-
-        # 逐 robot 的 step 级日志 / Per-robot step-level logs
-        self.agent_step_records: List[Dict] = []
-
-        # 记录初始状态 / Record initial state snapshot
-        self._record_agent_step_snapshot(step_idx=-1, record_type="initial")
-
-    def _record_agent_step_snapshot(self, step_idx: int, record_type: str = "step") -> None:
-        """
-        记录每个 step、每个机器人的详细状态
-        Record detailed per-step state for every robot
-        """
-        for agent in self.agents:
-            goal = agent.state.current_goal
-            pos = agent.state.position
-
-            self.agent_step_records.append({
-                "record_type": record_type,
-                "step": step_idx,
-                "robot_id": agent.state.robot_id,
-                "x": pos[0],
-                "y": pos[1],
-                "mode": agent.state.mode.value if hasattr(agent.state.mode, "value") else str(agent.state.mode),
-                "goal_x": goal[0] if goal is not None else None,
-                "goal_y": goal[1] if goal is not None else None,
-                "path_remaining": len(agent.state.current_path),
-                "trajectory_length": len(agent.state.trajectory),
-                "cleaned_cells": agent.state.cleaned_cells,
-                "idle_steps": agent.state.idle_steps,
-                "in_cleanup_phase": getattr(agent, "in_cleanup_phase", False),
-                "done_reason": agent.state.done_reason,
-            })
-
-    def export_agent_step_records(self) -> List[Dict]:
-        """
-        导出逐 robot 的 step 日志 / Export per-robot step logs
-        """
-        return self.agent_step_records
-
-    def export_per_agent_summary(self) -> List[Dict]:
-        """
-        导出每个机器人的汇总信息 / Export per-agent summary
-        """
-        summaries: List[Dict] = []
-
-        for agent in self.agents:
-            traj = agent.state.trajectory
-            start_pos = traj[0] if traj else agent.state.position
-            final_pos = traj[-1] if traj else agent.state.position
-            cleanup_cells = getattr(agent, "cleanup_cleaned_cells", set())
-
-            summaries.append({
-                "robot_id": agent.state.robot_id,
-                "start_pos": list(start_pos),
-                "final_pos": list(final_pos),
-                "trajectory_length": len(traj),
-                "path_length": max(0, len(traj) - 1),
-                "cleaned_cells": agent.state.cleaned_cells,
-                "idle_steps": agent.state.idle_steps,
-                "mode": agent.state.mode.value if hasattr(agent.state.mode, "value") else str(agent.state.mode),
-                "done_reason": agent.state.done_reason,
-                "cleanup_started": getattr(agent, "in_cleanup_phase", False),
-                "cleanup_start_traj_index": getattr(agent, "cleanup_start_traj_index", None),
-                "cleanup_cleaned_cells_count": len(cleanup_cells),
-            })
-
-        return summaries
-
-    def export_agent_trajectories(self) -> List[Dict]:
-        """
-        导出每个机器人的完整轨迹和阶段信息
-        Export full per-agent trajectories and phase information
-        """
-        data: List[Dict] = []
-
-        for agent in self.agents:
-            cleanup_cells = sorted(list(getattr(agent, "cleanup_cleaned_cells", set())))
-            data.append({
-                "robot_id": agent.state.robot_id,
-                "trajectory": [list(pos) for pos in agent.state.trajectory],
-                "cleanup_start_traj_index": getattr(agent, "cleanup_start_traj_index", None),
-                "cleanup_cleaned_cells": [list(pos) for pos in cleanup_cells],
-            })
-
-        return data
+        self.termination_reason: Optional[str] = None
+        self.shared_belief_map: Optional[OccupancyGrid] = None
+        self.shared_discovered_chargers: Set[Position] = set()
+        if "shared_map" in coordination_strategy:
+            self.shared_belief_map = OccupancyGrid(env_map.width, env_map.height)
 
     def step(self) -> None:
         """
-        执行一个仿真 step / Execute one simulation step
+        执行一个仿真 step / Execute one simulation step.
         """
+        robot_positions = {agent.state.position for agent in self.agents if agent.state.mode != AgentMode.DONE}
+        if self.dynamic_obstacle_policy is not None:
+            self.dynamic_obstacle_policy.step(self.env_map, forbidden=robot_positions)
+
+        self._communicate_maps()
+
+        selected_goals: Set[Position] = set()
+        charge_permissions = self._charging_permissions()
+
         for agent in self.agents:
-            agent.step(self.env_map)
+            if agent.state.mode == AgentMode.DONE:
+                continue
+
+            reserved_goals = None
+            if self._use_goal_reservation():
+                reserved_goals = self._reserved_goals_for(agent, selected_goals)
+
+            agent.step(
+                self.env_map,
+                reserved_goals=reserved_goals,
+                can_charge=charge_permissions.get(agent.state.robot_id, True),
+            )
+
+            if agent.state.current_goal is not None:
+                selected_goals.add(agent.state.current_goal)
+
+        self._communicate_maps()
 
         self.metrics_collector.record_step(
             env_map=self.env_map,
             agents=self.agents,
             step_idx=self.current_step,
         )
-        self._record_agent_step_snapshot(step_idx=self.current_step, record_type="step")
         self.current_step += 1
 
+    def _use_goal_reservation(self) -> bool:
+        return "reservation" in self.coordination_strategy or self.coordination_strategy == "goal_reservation"
+
+    def _reserved_goals_for(self, current_agent: RobotAgent, selected_goals: Set[Position]) -> Set[Position]:
+        goals = set(selected_goals)
+        for agent in self.agents:
+            if agent is current_agent or agent.state.mode == AgentMode.DONE:
+                continue
+            if agent.state.current_goal is not None:
+                goals.add(agent.state.current_goal)
+        return goals
+
+    def _charging_permissions(self) -> Dict[int, bool]:
+        """
+        Enforce charging station capacity.
+
+        Robots physically at the same charging station compete for limited
+        charging slots. Lowest battery is prioritised.
+        """
+        permissions: Dict[int, bool] = {
+            agent.state.robot_id: True for agent in self.agents
+        }
+
+        station_to_agents: Dict[Position, List[RobotAgent]] = defaultdict(list)
+        for agent in self.agents:
+            if (
+                agent.enable_battery
+                and agent.state.battery_level is not None
+                and agent.state.position in self.env_map.charging_stations
+                and agent.state.battery_level < agent.battery_capacity
+                and agent.state.mode != AgentMode.DONE
+            ):
+                station_to_agents[agent.state.position].append(agent)
+
+        for station, waiting_agents in station_to_agents.items():
+            waiting_agents.sort(key=lambda a: (a.state.battery_level or 0.0, a.state.robot_id))
+            allowed = {a.state.robot_id for a in waiting_agents[: self.charging_station_capacity]}
+            for agent in waiting_agents:
+                permissions[agent.state.robot_id] = agent.state.robot_id in allowed
+
+        return permissions
+
+    def _communicate_maps(self) -> None:
+        if self.shared_belief_map is None:
+            return
+        if self.current_step % self.communication_interval != 0:
+            return
+
+        # Upload local maps and discovered chargers to global shared state.
+        for agent in self.agents:
+            if self.rng.random() < self.communication_loss_rate:
+                continue
+            self.shared_belief_map.merge(agent.belief_map)
+            self.shared_discovered_chargers.update(agent.state.discovered_charging_stations)
+            agent.consume_communication_energy()
+
+        # Download global map and shared charger discoveries to each robot.
+        for agent in self.agents:
+            if self.rng.random() < self.communication_loss_rate:
+                continue
+            agent.belief_map.merge(self.shared_belief_map)
+            agent.merge_discovered_chargers(self.shared_discovered_chargers)
+            agent.consume_communication_energy()
+
     def is_done(self) -> bool:
-        """
-        判断仿真是否结束 / Check whether simulation is finished
-        """
         if self.current_step >= self.max_steps:
             self.termination_reason = "max_steps_reached"
+            return True
+
+        if self.metrics_collector.compute_coverage_rate(self.env_map) >= self.target_coverage:
+            self.termination_reason = "target_coverage_reached"
             return True
 
         if all(agent.state.mode == AgentMode.DONE for agent in self.agents):
@@ -143,9 +168,6 @@ class SimulationEngine:
         return False
 
     def run(self) -> dict:
-        """
-        运行仿真直到结束 / Run simulation until termination
-        """
         while not self.is_done():
             self.step()
 
@@ -153,12 +175,14 @@ class SimulationEngine:
             env_map=self.env_map,
             agents=self.agents,
             total_steps=self.current_step,
+            target_coverage=self.target_coverage,
         )
-
         results["termination_reason"] = self.termination_reason
+        results["coordination_strategy"] = self.coordination_strategy
+        results["charging_station_capacity"] = self.charging_station_capacity
+        results["charging_station_count"] = len(self.env_map.charging_stations)
         results["per_agent_done_reason"] = {
-            agent.state.robot_id: agent.state.done_reason
+            str(agent.state.robot_id): agent.state.done_reason
             for agent in self.agents
         }
-
         return results

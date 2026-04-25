@@ -194,3 +194,40 @@ class MapGenerator:
             raise RuntimeError("Unable to sample enough valid robot start positions.")
 
         return starts
+    def sample_charging_stations(
+        self,
+        grid_map: GridMap,
+        count: int,
+        forbidden: List[Position] | None = None,
+    ) -> List[Position]:
+        """
+        采样公共充电站位置 / Sample public charging station positions.
+
+        These are additional charging stations beyond the robots' start cells.
+        """
+        if count <= 0:
+            return []
+
+        forbidden_set = set(forbidden or [])
+        stations: List[Position] = []
+        tried = 0
+        max_tries = 5000
+
+        while len(stations) < count and tried < max_tries:
+            tried += 1
+            x = self.random.randint(1, grid_map.width - 2)
+            y = self.random.randint(1, grid_map.height - 2)
+            pos = (x, y)
+
+            if (
+                grid_map.is_walkable(pos)
+                and pos not in forbidden_set
+                and pos not in stations
+                and pos not in grid_map.charging_stations
+            ):
+                stations.append(pos)
+
+        if len(stations) < count:
+            raise RuntimeError("Unable to sample enough valid charging station positions.")
+
+        return stations
