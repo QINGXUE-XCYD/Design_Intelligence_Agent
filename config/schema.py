@@ -27,6 +27,7 @@ class RobotConfig:
     """
     num_agents: int = 2
     sensor_range: int = 3
+    sensor_mode: str = "manhattan"
     max_steps: int = 1500
     target_coverage: float = 0.95
 

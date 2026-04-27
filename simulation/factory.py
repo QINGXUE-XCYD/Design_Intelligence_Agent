@@ -55,6 +55,7 @@ def build_simulation(config: SimulationConfig) -> SimulationEngine:
             belief_map=belief_map,
             sensor_model=SensorModel(
                 config.robot_config.sensor_range,
+                mode=config.robot_config.sensor_mode,
                 false_positive_rate=config.robot_config.sensor_false_positive_rate,
                 false_negative_rate=config.robot_config.sensor_false_negative_rate,
                 seed=sensor_seed,
