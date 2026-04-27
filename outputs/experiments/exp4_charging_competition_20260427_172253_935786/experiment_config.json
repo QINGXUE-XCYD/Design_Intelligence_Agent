@@ -1,0 +1,42 @@
+{
+  "output_dir": "D:\\Programming_Study\\DIA\\outputs\\experiments",
+  "experiment_name": "exp4_charging_competition",
+  "seeds": [
+    11,
+    22,
+    33,
+    44,
+    55,
+    66,
+    77,
+    88,
+    99,
+    111
+  ],
+  "num_agents_values": [
+    2,
+    3,
+    4
+  ],
+  "charging_station_capacity_values": [
+    1,
+    2
+  ],
+  "coordination_strategy": "shared_map_reservation",
+  "sensor_range": 3,
+  "sensor_mode": "manhattan",
+  "obstacle_density": 0.15,
+  "map_width": 30,
+  "map_height": 30,
+  "max_steps": 2000,
+  "target_coverage": 0.95,
+  "dynamic_obstacle_count": 0,
+  "dynamic_obstacle_move_probability": 0.3,
+  "enable_battery": true,
+  "battery_capacity": 100.0,
+  "low_battery_threshold": 22.0,
+  "recharge_rate": 12.0,
+  "battery_safety_margin": 15.0,
+  "additional_charging_stations": 0,
+  "save_per_seed_artifacts": false
+}

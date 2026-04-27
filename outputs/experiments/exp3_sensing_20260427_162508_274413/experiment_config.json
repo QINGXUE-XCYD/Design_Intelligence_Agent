@@ -1,0 +1,41 @@
+{
+  "output_dir": "D:\\Programming_Study\\DIA\\outputs\\experiments",
+  "experiment_name": "exp3_sensing",
+  "seeds": [
+    11,
+    22,
+    33,
+    44,
+    55,
+    66,
+    77,
+    88,
+    99,
+    111
+  ],
+  "num_agents": 3,
+  "coordination_strategy": "shared_map_reservation",
+  "obstacle_density": 0.15,
+  "map_width": 30,
+  "map_height": 30,
+  "max_steps": 1500,
+  "target_coverage": 0.95,
+  "dynamic_obstacle_count": 0,
+  "dynamic_obstacle_move_probability": 0.3,
+  "enable_battery": true,
+  "charging_station_capacity": 1,
+  "range_values": [
+    2,
+    3,
+    4,
+    5
+  ],
+  "range_sensor_mode": "manhattan",
+  "mode_sensor_range": 3,
+  "sensor_modes": [
+    "manhattan",
+    "euclidean",
+    "occluded_manhattan"
+  ],
+  "save_per_seed_artifacts": false
+}

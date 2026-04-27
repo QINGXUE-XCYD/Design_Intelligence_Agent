@@ -1,0 +1,26 @@
+{
+  "map_config": {
+    "width": 20,
+    "height": 20,
+    "obstacle_density": 0.15,
+    "seed": 42
+  },
+  "robot_config": {
+    "num_agents": 1,
+    "sensor_range": 3,
+    "max_steps": 500
+  },
+  "batch_config": {
+    "enabled": true,
+    "experiment_name": "single_agent_baseline",
+    "seeds": [
+      42,
+      52,
+      62,
+      72,
+      82
+    ],
+    "base_output_dir": "outputs/experiments",
+    "save_per_seed_details": false
+  }
+}

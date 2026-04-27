@@ -1,0 +1,6 @@
+seed,num_agents,total_steps,coverage_rate,total_path_length,total_cleaned_cells,idle_steps,termination_reason,success
+42,1,382,1.0,381.0,276,0,all_agents_done,True
+52,1,430,1.0,429.0,276,0,all_agents_done,True
+62,1,413,1.0,412.0,276,0,all_agents_done,True
+72,1,409,1.0,408.0,276,0,all_agents_done,True
+82,1,414,1.0,413.0,276,0,all_agents_done,True
