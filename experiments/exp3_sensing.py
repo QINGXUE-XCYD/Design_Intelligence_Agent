@@ -240,13 +240,13 @@ def save_section_report(
     output_lines: List[str],
     aggregate_summary: Dict,
 ) -> None:
-    lines = [f"# {title}", "", "## 实验设置", ""]
+    lines = [f"# {title}", "", "## Controlled Variables", ""]
     lines.extend(config_lines)
-    lines.extend(["", "## 主要指标", ""])
+    lines.extend(["", "## Main Metrics", ""])
     lines.extend(metric_lines)
-    lines.extend(["", "## 输出文件", ""])
+    lines.extend(["", "## Output Files", ""])
     lines.extend(output_lines)
-    lines.extend(["", "## 快速结果总结", ""])
+    lines.extend(["", "## Quick Summary", ""])
     for summary in aggregate_summary.get("summaries", []):
         lines.append(
             "- "

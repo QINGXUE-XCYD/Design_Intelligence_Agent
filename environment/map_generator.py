@@ -87,9 +87,6 @@ class MapGenerator:
                 grid_map.add_static_obstacle(pos)
                 placed_count += 1
 
-        # 可选：你也可以在这里打印 placed_count 作为调试信息
-        # Optional: print placed_count here for debugging if needed
-
     def _sample_interior_cell(self, grid_map: GridMap) -> Position:
         """
         随机采样内部格子 / Randomly sample an interior cell
