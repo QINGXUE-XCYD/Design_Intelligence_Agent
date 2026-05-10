@@ -2,6 +2,17 @@
 
 A Python-based 2D grid simulation system for studying autonomous exploration, map building, path planning, cooperative cleaning, and resource competition among multiple robots in partially unknown indoor environments.
 
+## Requirements
+
+- Python 3.8+
+- numpy, matplotlib (required for experiments)
+
+### Installation
+
+```bash
+pip install -r requirements.txt
+```
+
 ## Quick Start
 
 ```bash
@@ -40,7 +51,4 @@ python experiments/exp4_charging_competition.py   # Charging competition
 | 3 | Sensing | range = [2,3,4,5], modes = manhattan/euclidean/occluded_manhattan |
 | 4 | Charging Competition | agents × station_capacity |
 
-## Requirements
 
-- Python 3.8+
-- numpy, matplotlib (required for experiments)
